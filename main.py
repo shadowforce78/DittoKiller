@@ -10,7 +10,7 @@ from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QImage
 from pynput import keyboard
 
 DATA_DIR = "data"
-RETENTION_SECONDS = 60 # 1 minute for testing
+RETENTION_SECONDS = 60 * 60 * 24 * 7 # 1 week
 
 class SignalHandler(QObject):
     toggle_visibility = pyqtSignal()
