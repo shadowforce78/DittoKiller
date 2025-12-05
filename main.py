@@ -3,25 +3,97 @@ import threading
 import os
 import time
 import shutil
+import json
 from datetime import datetime
-from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QSystemTrayIcon, QMenu, QListWidget, QListWidgetItem
+from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QSystemTrayIcon, QMenu, QListWidget, QListWidgetItem, QPushButton, QHBoxLayout, QLabel, QDialog, QLineEdit, QFormLayout
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QTimer, QStandardPaths
-from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QImage
+from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QKeySequence
 from pynput import keyboard
 
 # Define app metadata for QStandardPaths
 APP_NAME = "DittoKiller"
 ORG_NAME = "SaumonDeluxe"
 
+# Default Config
+DEFAULT_CONFIG = {
+    "hotkey": "<ctrl>+<alt>+<shift>+v",
+    "retention_days": 7
+}
+
+class ConfigManager:
+    def __init__(self, data_dir):
+        self.config_file = os.path.join(data_dir, "config.json")
+        self.config = DEFAULT_CONFIG.copy()
+        self.load_config()
+
+    def load_config(self):
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    data = json.load(f)
+                    self.config.update(data)
+            except Exception as e:
+                print(f"Error loading config: {e}")
+
+    def save_config(self):
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(self.config, f, indent=4)
+        except Exception as e:
+            print(f"Error saving config: {e}")
+
+    def get(self, key):
+        return self.config.get(key, DEFAULT_CONFIG.get(key))
+
+    def set(self, key, value):
+        self.config[key] = value
+        self.save_config()
+
 class SignalHandler(QObject):
     toggle_visibility = pyqtSignal()
     quit_app = pyqtSignal()
     update_clipboard = pyqtSignal(dict)
+    restart_hotkey = pyqtSignal()
+
+class SettingsDialog(QDialog):
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.setWindowTitle("Settings")
+        self.setFixedSize(300, 150)
+        self.setStyleSheet("background-color: #2e2e2e; color: white;")
+        
+        layout = QVBoxLayout()
+        
+        form_layout = QFormLayout()
+        
+        self.hotkey_input = QLineEdit()
+        self.hotkey_input.setText(self.config_manager.get("hotkey"))
+        self.hotkey_input.setPlaceholderText("e.g. <ctrl>+<alt>+v")
+        self.hotkey_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555; padding: 5px;")
+        
+        form_layout.addRow("Global Hotkey:", self.hotkey_input)
+        
+        layout.addLayout(form_layout)
+        
+        save_btn = QPushButton("Save && Restart Hotkey")
+        save_btn.setStyleSheet("background-color: #007acc; padding: 8px; border: none; border-radius: 4px;")
+        save_btn.clicked.connect(self.save_settings)
+        layout.addWidget(save_btn)
+        
+        self.setLayout(layout)
+
+    def save_settings(self):
+        new_hotkey = self.hotkey_input.text()
+        self.config_manager.set("hotkey", new_hotkey)
+        signal_handler.restart_hotkey.emit()
+        self.accept()
 
 class OverlayWindow(QWidget):
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, config_manager):
         super().__init__()
         self.data_dir = data_dir
+        self.config_manager = config_manager
         self.history = []
         self.load_history()
         self.initUI()
@@ -48,6 +120,20 @@ class OverlayWindow(QWidget):
 
         # Layout and content
         layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Header with Settings button
+        header_layout = QHBoxLayout()
+        header_layout.addStretch()
+        
+        settings_btn = QPushButton("⚙") # Gear icon
+        settings_btn.setFixedSize(30, 30)
+        settings_btn.setStyleSheet("background-color: transparent; color: white; font-size: 18px; border: none;")
+        settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_btn.clicked.connect(self.open_settings)
+        header_layout.addWidget(settings_btn)
+        
+        layout.addLayout(header_layout)
         
         self.list_widget = QListWidget()
         self.list_widget.setStyleSheet("""
@@ -77,6 +163,10 @@ class OverlayWindow(QWidget):
         self.setLayout(layout)
         
         self.update_list()
+
+    def open_settings(self):
+        dlg = SettingsDialog(self.config_manager, self)
+        dlg.exec()
 
     def toggle(self):
         if self.isVisible():
@@ -172,9 +262,9 @@ class OverlayWindow(QWidget):
 
     def cleanup_items(self):
         current_time = int(time.time() * 1000)
-        # Using global RETENTION_SECONDS if defined, else fallback
-        retention_sec = globals().get('RETENTION_SECONDS', 60 * 60 * 24 * 7)
-        retention_ms = retention_sec * 1000
+        # Using config or global fallback
+        retention_days = self.config_manager.get("retention_days")
+        retention_ms = retention_days * 24 * 60 * 60 * 1000
         
         items_to_remove = []
         
@@ -304,14 +394,89 @@ def on_activate():
     # Emit signal to toggle window in main thread
     signal_handler.toggle_visibility.emit()
 
-def start_global_listener():
-    try:
-        with keyboard.GlobalHotKeys({
-            '<ctrl>+ù': on_activate
-        }) as h:    
-            h.join()
-    except Exception as e:
-        print(f"Error in hotkey listener: {e}")
+class HotkeyListener(threading.Thread):
+    def __init__(self, config_manager):
+        super().__init__()
+        self.config_manager = config_manager
+        self.listener = None
+        self.running = True
+        self.active_hotkey = None
+
+    def run(self):
+        while self.running:
+            hotkey_str = self.config_manager.get("hotkey")
+            if hotkey_str != self.active_hotkey:
+                if self.listener:
+                    self.listener.stop()
+                    self.listener = None
+                
+                self.active_hotkey = hotkey_str
+                try:
+                    self.listener = keyboard.GlobalHotKeys({
+                        hotkey_str: on_activate
+                    })
+                    self.listener.start()
+                    print(f"Hotkey listener started with: {hotkey_str}")
+                except Exception as e:
+                    print(f"Failed to start hotkey listener with {hotkey_str}: {e}")
+                    self.active_hotkey = None # Retry or wait
+            
+            time.sleep(1) # Check for changes or just wait
+
+    def stop(self):
+        self.running = False
+        if self.listener:
+            self.listener.stop()
+
+# Helper to restart hotkey via signal
+def restart_hotkey_listener():
+    # In this design, the thread checks periodically/active_hotkey.
+    # But to force immediate update, we can perhaps just have the thread loop faster
+    # or handle it better.
+    # Actually, simplest is to just rely on the loop checking or improve the thread.
+    # Let's improve the thread to wake up on signal ideally, or just polling 1s is fine.
+    # But wait, pynput listener blocks? No, start() is non-blocking.
+    pass
+
+hotkey_thread = None
+
+def run_hotkey_manager(config_manager):
+    global hotkey_thread
+    current_hotkey = config_manager.get("hotkey")
+    listener = None
+    
+    while True:
+        try:
+            # Create new listener if hotkey changed
+            new_hotkey = config_manager.get("hotkey")
+            
+            if new_hotkey != current_hotkey or listener is None:
+                if listener:
+                    listener.stop()
+                    # listener.join() # Might block?
+                
+                print(f"Starting hotkey listener: {new_hotkey}")
+                try:
+                    listener = keyboard.GlobalHotKeys({
+                        new_hotkey: on_activate
+                    })
+                    listener.start()
+                    current_hotkey = new_hotkey
+                except Exception as e:
+                    print(f"Error starting hotkey: {e}")
+                    listener = None
+                    
+            # Wait for restart signal
+            # This is a bit hacky for a thread. 
+            # A better way is: Main thread receives signal -> sets a flag -> Thread checks flag.
+            # Or assume we just restart the whole thread? No.
+            # Let's simple polling for now in the thread loop.
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"Hotkey manager error: {e}")
+            time.sleep(1)
+
 
 def clipboard_changed():
     clipboard = QApplication.clipboard()
@@ -339,9 +504,12 @@ def clipboard_changed():
             signal_handler.update_clipboard.emit({"type": "image", "path": path})
             
     elif mime_data.hasText():
-        text = clipboard.text()
-        if text:
-            signal_handler.update_clipboard.emit({"type": "text", "content": text})
+        try:
+            text = clipboard.text()
+            if text:
+                signal_handler.update_clipboard.emit({"type": "text", "content": text})
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
@@ -350,8 +518,6 @@ if __name__ == '__main__':
     app.setOrganizationName(ORG_NAME)
 
     # Determine data directory
-    # AppLocalDataLocation is usually %LOCALAPPDATA%/OrgName/AppName on Windows
-    # and ~/.local/share/OrgName/AppName on Linux
     base_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
     data_dir = os.path.join(base_data_path, "data")
     if not os.path.exists(data_dir):
@@ -359,15 +525,22 @@ if __name__ == '__main__':
     
     print(f"Data storage: {data_dir}")
 
+    # Config
+    config_manager = ConfigManager(base_data_path)
+
     # Signal handler to communicate between thread and GUI
     signal_handler = SignalHandler()
     
-    window = OverlayWindow(data_dir)
+    window = OverlayWindow(data_dir, config_manager)
     
     # Connect signals
     signal_handler.toggle_visibility.connect(window.toggle)
     signal_handler.update_clipboard.connect(window.add_to_history)
-
+    
+    # We need to restart hotkey manager when signal received
+    # But hotkey manager is in a loop.
+    # Ideally we just update the config_manager (already done in dialog) and the loop picks it up.
+    
     # Clipboard monitoring
     clipboard = app.clipboard()
     clipboard.dataChanged.connect(clipboard_changed)
@@ -389,9 +562,9 @@ if __name__ == '__main__':
     tray_icon.setContextMenu(menu)
     tray_icon.show()
 
-    # Start hotkey listener in a separate thread
-    listener_thread = threading.Thread(target=start_global_listener, daemon=True)
-    listener_thread.start()
+    # Start hotkey listener/manager
+    hotkey_thread = threading.Thread(target=run_hotkey_manager, args=(config_manager,), daemon=True)
+    hotkey_thread.start()
 
     # Start hidden (do not call window.show())
     
