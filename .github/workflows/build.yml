@@ -11,7 +11,15 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            pyinstaller_args: '--hidden-import "pynput.keyboard._xorg" --hidden-import "pynput.mouse._xorg"'
+          - os: windows-latest
+            pyinstaller_args: ''
+          - os: macos-latest
+            pyinstaller_args: ''
+          - os: macos-13
+            pyinstaller_args: ''
 
     runs-on: ${{ matrix.os }}
 
@@ -30,7 +38,7 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --name DittoKiller --onefile --windowed --noconsole --hidden-import "pynput.keyboard._xorg" --hidden-import "pynput.mouse._xorg" main.py
+        pyinstaller --name DittoKiller --onefile --windowed --noconsole ${{ matrix.pyinstaller_args }} main.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
