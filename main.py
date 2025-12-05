@@ -5,12 +5,13 @@ import time
 import shutil
 from datetime import datetime
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QSystemTrayIcon, QMenu, QListWidget, QListWidgetItem
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QTimer, QStandardPaths
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QImage
 from pynput import keyboard
 
-DATA_DIR = "data"
-RETENTION_SECONDS = 60 * 60 * 24 * 7 # 1 week
+# Define app metadata for QStandardPaths
+APP_NAME = "DittoKiller"
+ORG_NAME = "SaumonDeluxe"
 
 class SignalHandler(QObject):
     toggle_visibility = pyqtSignal()
@@ -18,8 +19,9 @@ class SignalHandler(QObject):
     update_clipboard = pyqtSignal(dict)
 
 class OverlayWindow(QWidget):
-    def __init__(self):
+    def __init__(self, data_dir):
         super().__init__()
+        self.data_dir = data_dir
         self.history = []
         self.load_history()
         self.initUI()
@@ -94,17 +96,17 @@ class OverlayWindow(QWidget):
 
     def get_day_folder(self, timestamp):
         date_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d')
-        return os.path.join(DATA_DIR, date_str)
+        return os.path.join(self.data_dir, date_str)
 
     def load_history(self):
         self.history = []
-        if not os.path.exists(DATA_DIR):
-            os.makedirs(DATA_DIR)
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir)
             return
 
         # Walk through all date folders
-        for date_folder in os.listdir(DATA_DIR):
-            full_date_folder = os.path.join(DATA_DIR, date_folder)
+        for date_folder in os.listdir(self.data_dir):
+            full_date_folder = os.path.join(self.data_dir, date_folder)
             if not os.path.isdir(full_date_folder):
                 continue
             
@@ -158,13 +160,6 @@ class OverlayWindow(QWidget):
             item_dict['timestamp'] = timestamp
             
         elif item_dict['type'] == 'image':
-            # Image is already saved in 'images/' by clipboard_changed, we need to move it or save it to data/
-            # The clipboard_changed function saves to IMAGES_DIR. We should change that logic or move it here.
-            # Let's assume clipboard_changed passes a temp path or we handle it.
-            # Actually, let's update clipboard_changed to just pass data and we save here?
-            # Or clipboard_changed saves to a temp location.
-            # For now, let's move the file from the path provided in item_dict to our structure.
-            
             src_path = item_dict['path']
             filename = f"{timestamp}_image.png"
             dest_path = os.path.join(folder, filename)
@@ -177,7 +172,9 @@ class OverlayWindow(QWidget):
 
     def cleanup_items(self):
         current_time = int(time.time() * 1000)
-        retention_ms = RETENTION_SECONDS * 1000
+        # Using global RETENTION_SECONDS if defined, else fallback
+        retention_sec = globals().get('RETENTION_SECONDS', 60 * 60 * 24 * 7)
+        retention_ms = retention_sec * 1000
         
         items_to_remove = []
         
@@ -199,9 +196,9 @@ class OverlayWindow(QWidget):
             self.update_list()
             
         # Clean empty folders
-        if os.path.exists(DATA_DIR):
-            for date_folder in os.listdir(DATA_DIR):
-                full_date_folder = os.path.join(DATA_DIR, date_folder)
+        if os.path.exists(self.data_dir):
+            for date_folder in os.listdir(self.data_dir):
+                full_date_folder = os.path.join(self.data_dir, date_folder)
                 if os.path.isdir(full_date_folder):
                     if not os.listdir(full_date_folder):
                         try:
@@ -213,11 +210,6 @@ class OverlayWindow(QWidget):
         if not item_dict:
             return
         
-        # Deduplication (move to top if exists)
-        # We need to check content for text, or maybe just treat every new copy as new?
-        # User asked for deduplication before.
-        # If we move to top, we should update its timestamp to NOW, so it stays for another minute.
-        
         current_timestamp = int(time.time() * 1000)
         item_dict['timestamp'] = current_timestamp
         
@@ -227,14 +219,9 @@ class OverlayWindow(QWidget):
                 if existing['type'] == 'text' and existing['content'] == item_dict['content']:
                     to_remove = existing
                     break
-                # For images, hard to compare content without hashing. 
-                # If the user copies the same image, it comes as a new bitmap from clipboard.
-                # So it will be a new file. We can't easily deduplicate images without hashing.
-                # We'll skip image deduplication for now unless we implement hashing.
         
         if to_remove:
             self.history.remove(to_remove)
-            # Should we delete the old file? Yes, because we are creating a new one with new timestamp.
             if os.path.exists(to_remove['path']):
                 os.remove(to_remove['path'])
 
@@ -330,24 +317,23 @@ def clipboard_changed():
     clipboard = QApplication.clipboard()
     mime_data = clipboard.mimeData()
     
-    # We need to pass data to main thread to save it properly with timestamp
-    # For images, we need to save it temporarily or pass the QImage?
-    # QImage cannot be passed through signal easily if it's across threads, but here we are in main thread (Qt signal).
-    # So we can save it to a temp file or just pass the object?
-    # Actually, let's just save it to a temp file in /tmp or just use the old images dir as temp.
-    
     if mime_data.hasImage():
         image = clipboard.image()
         if not image.isNull():
-            # Save to temp location
+            # Save to temp location using QStandardPaths or tempfile
             timestamp = int(time.time() * 1000)
-            # Use a temp dir
-            temp_dir = "temp_images"
-            if not os.path.exists(temp_dir):
-                os.makedirs(temp_dir)
+            
+            # Use CacheLocation for temporary images
+            temp_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.CacheLocation)
+            if not temp_dir:
+                temp_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.TempLocation)
+                
+            temp_images_dir = os.path.join(temp_dir, "temp_images")
+            if not os.path.exists(temp_images_dir):
+                os.makedirs(temp_images_dir)
             
             filename = f"temp_{timestamp}.png"
-            path = os.path.join(temp_dir, filename)
+            path = os.path.join(temp_images_dir, filename)
             image.save(path, "PNG")
             
             signal_handler.update_clipboard.emit({"type": "image", "path": path})
@@ -360,11 +346,23 @@ def clipboard_changed():
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(ORG_NAME)
+
+    # Determine data directory
+    # AppLocalDataLocation is usually %LOCALAPPDATA%/OrgName/AppName on Windows
+    # and ~/.local/share/OrgName/AppName on Linux
+    base_data_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+    data_dir = os.path.join(base_data_path, "data")
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+    
+    print(f"Data storage: {data_dir}")
 
     # Signal handler to communicate between thread and GUI
     signal_handler = SignalHandler()
     
-    window = OverlayWindow()
+    window = OverlayWindow(data_dir)
     
     # Connect signals
     signal_handler.toggle_visibility.connect(window.toggle)

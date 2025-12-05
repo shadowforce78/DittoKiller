@@ -30,26 +30,7 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --name DittoKiller --onefile --windowed --noconsole --add-data "images:images" --add-data "data:data" main.py
-      # Note: --add-data syntax differs on Windows vs Unix. 
-      # GitHub Actions defaults to bash on non-Windows, but we need to handle separator.
-      # Let's adjust the command based on OS or use a script.
-      # Simplified attempt below for cross-platform compatibility if possible, 
-      # or better yet, split steps.
-
-    - name: Build with PyInstaller (Linux/macOS)
-      if: runner.os != 'Windows'
-      run: |
-        # Ensure directories exist so PyInstaller doesn't complain if they are empty or missing
-        mkdir -p images data
-        pyinstaller --name DittoKiller --onefile --windowed --noconsole --add-data "images:images" --add-data "data:data" main.py
-
-    - name: Build with PyInstaller (Windows)
-      if: runner.os == 'Windows'
-      run: |
-        if not exist images mkdir images
-        if not exist data mkdir data
-        pyinstaller --name DittoKiller --onefile --windowed --noconsole --add-data "images;images" --add-data "data;data" main.py
+        pyinstaller --name DittoKiller --onefile --windowed --noconsole main.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
