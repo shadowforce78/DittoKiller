@@ -10,6 +10,8 @@ from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QTimer, QStandardPaths
 from PyQt6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QKeySequence
 from pynput import keyboard
 
+import platform
+
 # Define app metadata for QStandardPaths
 APP_NAME = "DittoKiller"
 ORG_NAME = "SaumonDeluxe"
@@ -17,8 +19,106 @@ ORG_NAME = "SaumonDeluxe"
 # Default Config
 DEFAULT_CONFIG = {
     "hotkey": "<ctrl>+<alt>+<shift>+v",
-    "retention_days": 7
+    "retention_days": 7,
+    "run_on_startup": False
 }
+
+class StartupManager:
+    def __init__(self):
+        self.system = platform.system()
+        self.app_name = APP_NAME
+        # Determine executable path
+        if getattr(sys, 'frozen', False):
+            self.app_path = sys.executable
+        else:
+            self.app_path = os.path.abspath(sys.argv[0]) # Fallback for script
+
+    def set_startup(self, enable):
+        try:
+            if self.system == "Windows":
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
+                if enable:
+                    winreg.SetValueEx(key, self.app_name, 0, winreg.REG_SZ, self.app_path)
+                else:
+                    try:
+                        winreg.DeleteValue(key, self.app_name)
+                    except FileNotFoundError:
+                        pass
+                key.Close()
+            
+            elif self.system == "Darwin": # macOS
+                plist_path = os.path.expanduser(f"~/Library/LaunchAgents/com.saumondeluxe.{self.app_name.lower()}.plist")
+                if enable:
+                    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.saumondeluxe.{self.app_name.lower()}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{self.app_path}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"""
+                    with open(plist_path, "w") as f:
+                        f.write(plist_content)
+                else:
+                    if os.path.exists(plist_path):
+                        os.remove(plist_path)
+
+            elif self.system == "Linux":
+                autostart_dir = os.path.expanduser("~/.config/autostart")
+                desktop_file = os.path.join(autostart_dir, f"{self.app_name.lower()}.desktop")
+                
+                if enable:
+                    if not os.path.exists(autostart_dir):
+                        os.makedirs(autostart_dir)
+                    
+                    content = f"""[Desktop Entry]
+Type=Application
+Name={self.app_name}
+Exec="{self.app_path}"
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true
+"""
+                    with open(desktop_file, "w") as f:
+                        f.write(content)
+                else:
+                    if os.path.exists(desktop_file):
+                        os.remove(desktop_file)
+                        
+        except Exception as e:
+            print(f"Error setting startup: {e}")
+
+    def is_enabled(self):
+        # We rely on the config for state, but could verify file existence.
+        # For simplicity, returning what is logically expected would be config-based,
+        # but here we might want to know the system state.
+        # Let's rely on config passed to dialog, or check path existence.
+        # Checking implementation:
+        try:
+            if self.system == "Windows":
+                 import winreg
+                 key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+                 try:
+                     winreg.QueryValueEx(key, self.app_name)
+                     key.Close()
+                     return True
+                 except FileNotFoundError:
+                     key.Close()
+                     return False
+            elif self.system == "Darwin":
+                return os.path.exists(os.path.expanduser(f"~/Library/LaunchAgents/com.saumondeluxe.{self.app_name.lower()}.plist"))
+            elif self.system == "Linux":
+                return os.path.exists(os.path.expanduser(f"~/.config/autostart/{self.app_name.lower()}.desktop"))
+        except Exception:
+            return False
+        return False
 
 class ConfigManager:
     def __init__(self, data_dir):
@@ -55,12 +155,15 @@ class SignalHandler(QObject):
     update_clipboard = pyqtSignal(dict)
     restart_hotkey = pyqtSignal()
 
+from PyQt6.QtWidgets import QCheckBox
+
 class SettingsDialog(QDialog):
-    def __init__(self, config_manager, parent=None):
+    def __init__(self, config_manager, startup_manager, parent=None):
         super().__init__(parent)
         self.config_manager = config_manager
+        self.startup_manager = startup_manager
         self.setWindowTitle("Settings")
-        self.setFixedSize(300, 150)
+        self.setFixedSize(300, 200)
         self.setStyleSheet("background-color: #2e2e2e; color: white;")
         
         layout = QVBoxLayout()
@@ -72,11 +175,16 @@ class SettingsDialog(QDialog):
         self.hotkey_input.setPlaceholderText("e.g. <ctrl>+<alt>+v")
         self.hotkey_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555; padding: 5px;")
         
+        self.startup_check = QCheckBox("Run on Startup")
+        self.startup_check.setChecked(self.config_manager.get("run_on_startup"))
+        # self.startup_check.setChecked(self.startup_manager.is_enabled()) # Could also sync with system
+        
         form_layout.addRow("Global Hotkey:", self.hotkey_input)
+        form_layout.addRow("", self.startup_check)
         
         layout.addLayout(form_layout)
         
-        save_btn = QPushButton("Save && Restart Hotkey")
+        save_btn = QPushButton("Save && Apply")
         save_btn.setStyleSheet("background-color: #007acc; padding: 8px; border: none; border-radius: 4px;")
         save_btn.clicked.connect(self.save_settings)
         layout.addWidget(save_btn)
@@ -85,15 +193,23 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         new_hotkey = self.hotkey_input.text()
+        run_startup = self.startup_check.isChecked()
+        
         self.config_manager.set("hotkey", new_hotkey)
+        self.config_manager.set("run_on_startup", run_startup)
+        
+        # Apply startup logic
+        self.startup_manager.set_startup(run_startup)
+        
         signal_handler.restart_hotkey.emit()
         self.accept()
 
 class OverlayWindow(QWidget):
-    def __init__(self, data_dir, config_manager):
+    def __init__(self, data_dir, config_manager, startup_manager):
         super().__init__()
         self.data_dir = data_dir
         self.config_manager = config_manager
+        self.startup_manager = startup_manager
         self.history = []
         self.load_history()
         self.initUI()
@@ -165,7 +281,7 @@ class OverlayWindow(QWidget):
         self.update_list()
 
     def open_settings(self):
-        dlg = SettingsDialog(self.config_manager, self)
+        dlg = SettingsDialog(self.config_manager, self.startup_manager, self)
         dlg.exec()
 
     def toggle(self):
@@ -434,7 +550,6 @@ def restart_hotkey_listener():
     # But to force immediate update, we can perhaps just have the thread loop faster
     # or handle it better.
     # Actually, simplest is to just rely on the loop checking or improve the thread.
-    # Let's improve the thread to wake up on signal ideally, or just polling 1s is fine.
     # But wait, pynput listener blocks? No, start() is non-blocking.
     pass
 
@@ -527,11 +642,13 @@ if __name__ == '__main__':
 
     # Config
     config_manager = ConfigManager(base_data_path)
+    # Startup Manager
+    startup_manager = StartupManager()
 
     # Signal handler to communicate between thread and GUI
     signal_handler = SignalHandler()
     
-    window = OverlayWindow(data_dir, config_manager)
+    window = OverlayWindow(data_dir, config_manager, startup_manager)
     
     # Connect signals
     signal_handler.toggle_visibility.connect(window.toggle)
@@ -565,6 +682,9 @@ if __name__ == '__main__':
     # Start hotkey listener/manager
     hotkey_thread = threading.Thread(target=run_hotkey_manager, args=(config_manager,), daemon=True)
     hotkey_thread.start()
+
+    # Apply startup config (if needed to sync, though usually just setting once is fine)
+    # startup_manager.set_startup(config_manager.get("run_on_startup")) # Optional enforce
 
     # Start hidden (do not call window.show())
     
