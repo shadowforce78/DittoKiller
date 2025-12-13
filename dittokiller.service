@@ -8,7 +8,7 @@ WorkingDirectory=%ROOT_DIR%
 ExecStart=%PYTHON_EXEC% %ROOT_DIR%/main.py
 Restart=always
 RestartSec=5
-Environment=DISPLAY=:0
+Environment=DISPLAY=%DISPLAY%
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
